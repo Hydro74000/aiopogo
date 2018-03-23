@@ -2,17 +2,21 @@ from asyncio import TimeoutError
 from time import time
 from html import unescape
 
-from aiohttp import ClientRequest, ClientSession, ClientError, ClientHttpProxyError, ClientProxyConnectionError, ClientResponseError, ServerTimeoutError
+import itertools
+from aiohttp import ClientRequest, ClientSession, ClientError, ClientHttpProxyError, ClientProxyConnectionError, \
+    ClientResponseError, ServerTimeoutError, BasicAuth
 
+from .utilities import get_proxy_auth
 from . import json_loads
 from .session import SESSIONS, ProxyClientRequest
 from .auth import Auth
-from .exceptions import ActivationRequiredException, AuthConnectionException, AuthException, AuthTimeoutException, InvalidCredentialsException, ProxyException, SocksError, UnexpectedAuthError
+from .exceptions import ActivationRequiredException, AuthConnectionException, AuthException, AuthTimeoutException, \
+    InvalidCredentialsException, ProxyException, SocksError, UnexpectedAuthError
 
 
 class AuthPtc(Auth):
     def __init__(self, username=None, password=None, proxy=None,
-                 proxy_auth=None, timeout=None, locale=None):
+                 proxy_auth=None, timeout=None, locale=None, auth_proxy_supplier=None):
         Auth.__init__(self)
         self.provider = 'ptc'
 
@@ -24,6 +28,7 @@ class AuthPtc(Auth):
         self.proxy = proxy
         self.socks = proxy and proxy.scheme in ('socks4', 'socks5')
         self.proxy_auth = proxy_auth
+        self.auth_proxy_supplier = auth_proxy_supplier
 
     async def user_login(self, username=None, password=None):
         self._username = username or self._username
@@ -37,10 +42,18 @@ class AuthPtc(Auth):
                 "Username/password not correctly specified") from e
         self.log.info('PTC User Login for: %s', self._username)
 
+        if self.auth_proxy_supplier:
+            proxy = await self.auth_proxy_supplier()
+            proxy_auth = get_proxy_auth(proxy)
+        else:
+            proxy = self.proxy
+            proxy_auth = self.proxy_auth
+        socks = proxy and proxy.scheme in ('socks4', 'socks5')
+
         try:
             now = time()
             async with ClientSession(
-                    connector=SESSIONS.get_connector(self.socks),
+                    connector=SESSIONS.get_connector(socks),
                     loop=self.loop,
                     headers=(('Host', 'sso.pokemon.com'),
                              ('Connection', 'keep-alive'),
@@ -49,15 +62,15 @@ class AuthPtc(Auth):
                              ('Accept-Language', self.locale.lower().replace('_', '-')),
                              ('Accept-Encoding', 'gzip, deflate'),
                              ('X-Unity-Version', '2017.1.2f1')),
-                    request_class=CustomProxyClientRequest if self.socks else CustomClientRequest,
+                    request_class=CustomProxyClientRequest if socks else CustomClientRequest,
                     connector_owner=False,
                     raise_for_status=True,
                     conn_timeout=self.timeout,
                     read_timeout=self.timeout) as session:
-                async with session.get('https://sso.pokemon.com/sso/logout', params={'service': 'https%3A%2F%2Fsso.pokemon.com%2Fsso%2Foauth2.0%2FcallbackAuthorize'}, proxy=self.proxy, proxy_auth=self.proxy_auth, allow_redirects=False) as _:
+                async with session.get('https://sso.pokemon.com/sso/logout', params={'service': 'https%3A%2F%2Fsso.pokemon.com%2Fsso%2Foauth2.0%2FcallbackAuthorize'}, proxy=proxy, proxy_auth=proxy_auth, allow_redirects=False) as _:
                     pass
 
-                async with session.get('https://sso.pokemon.com/sso/login', params={'service': 'https%3A%2F%2Fsso.pokemon.com%2Fsso%2Foauth2.0%2FcallbackAuthorize', 'locale': self.locale}, proxy=self.proxy, proxy_auth=self.proxy_auth) as resp:
+                async with session.get('https://sso.pokemon.com/sso/login', params={'service': 'https%3A%2F%2Fsso.pokemon.com%2Fsso%2Foauth2.0%2FcallbackAuthorize', 'locale': self.locale}, proxy=proxy, proxy_auth=proxy_auth) as resp:
                     data = await resp.json(loads=json_loads, encoding='utf-8', content_type=None)
 
                     assert 'lt' in data
@@ -65,7 +78,7 @@ class AuthPtc(Auth):
                     data['username'] = self._username
                     data['password'] = self._password
 
-                async with session.post('https://sso.pokemon.com/sso/login', params={'service': 'http://sso.pokemon.com/sso/oauth2.0/callbackAuthorize', 'locale': self.locale}, headers={'Content-Type': 'application/x-www-form-urlencoded'}, data=data, proxy=self.proxy, proxy_auth=self.proxy_auth, allow_redirects=False) as resp:
+                async with session.post('https://sso.pokemon.com/sso/login', params={'service': 'http://sso.pokemon.com/sso/oauth2.0/callbackAuthorize', 'locale': self.locale}, headers={'Content-Type': 'application/x-www-form-urlencoded'}, data=data, proxy=proxy, proxy_auth=proxy_auth, allow_redirects=False) as resp:
                     try:
                         self._access_token = resp.cookies['CASTGC'].value
                     except (AttributeError, KeyError, TypeError):
@@ -90,14 +103,14 @@ class AuthPtc(Auth):
                         'code': resp.headers['Location'].split("ticket=")[1]
                     }
 
-                async with session.post('https://sso.pokemon.com/sso/oauth2.0/accessToken', headers={'Content-Type': 'application/x-www-form-urlencoded'}, data=token_data, proxy=self.proxy, proxy_auth=self.proxy_auth) as resp:
+                async with session.post('https://sso.pokemon.com/sso/oauth2.0/accessToken', headers={'Content-Type': 'application/x-www-form-urlencoded'}, data=token_data, proxy=proxy, proxy_auth=proxy_auth) as resp:
                     profile_data = {
                         'access_token': self._access_token,
                         'client_id': 'mobile-app_pokemon-go',
                         'locale': self.locale
                     }
 
-                async with session.post('https://sso.pokemon.com/sso/oauth2.0/profile', headers={'Content-Type': 'application/x-www-form-urlencoded'}, data=profile_data, proxy=self.proxy, proxy_auth=self.proxy_auth) as _:
+                async with session.post('https://sso.pokemon.com/sso/oauth2.0/profile', headers={'Content-Type': 'application/x-www-form-urlencoded'}, data=profile_data, proxy=proxy, proxy_auth=proxy_auth) as _:
                     pass
 
         except (ClientHttpProxyError, ClientProxyConnectionError, SocksError) as e:
@@ -129,11 +142,13 @@ class AuthPtc(Auth):
         await self.user_login()
         return self._access_token
 
+
 class CustomClientRequest(ClientRequest):
     def update_transfer_encoding(self):
         super().update_transfer_encoding()
         if self.method == 'GET':
             self.headers.popall('Content-Length', None)
+
 
 class CustomProxyClientRequest(ProxyClientRequest):
     def update_transfer_encoding(self):

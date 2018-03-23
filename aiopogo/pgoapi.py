@@ -1,15 +1,8 @@
 from logging import getLogger
 
 from yarl import URL
-from aiohttp import BasicAuth
-try:
-    from aiosocks import Socks4Auth, Socks5Auth
-except ImportError:
-    class Socks4Auth(Exception):
-        def __init__(*args, **kwargs):
-            raise ImportError(
-                'You must install aiosocks to use a SOCKS proxy.')
-    Socks5Auth = Socks4Auth
+
+from aiopogo.utilities import get_proxy_auth
 
 from . import __title__, __version__
 from .rpc_api import RpcApi, RpcState
@@ -37,6 +30,7 @@ class PGoApi:
 
         self.proxy_auth = None
         self.proxy = proxy
+        self.auth_proxy_supplier = None
         self.device_info = device_info
 
     async def set_authentication(self, provider='ptc', username=None, password=None, timeout=10, locale='en_US', refresh_token=None):
@@ -46,7 +40,8 @@ class PGoApi:
                 password,
                 proxy=self._proxy,
                 proxy_auth=self.proxy_auth,
-                timeout=timeout)
+                timeout=timeout,
+                auth_proxy_supplier=self.auth_proxy_supplier)
         elif provider == 'google':
             self.auth_provider = AuthGoogle(
                 proxy=self._proxy, refresh_token=refresh_token)
@@ -57,6 +52,22 @@ class PGoApi:
                 "Invalid authentication provider - only ptc/google available.")
 
         await self.auth_provider.user_login(username, password)
+
+    def set_delay_handler(self, delay_handler):
+        self.state.delay_handler = delay_handler
+
+    def restore_ptc_auth(self, username, password, timeout, auth_token, expiry):
+        self.auth_provider = AuthPtc(
+            username,
+            password,
+            proxy=self._proxy,
+            proxy_auth=self.proxy_auth,
+            timeout=timeout,
+            auth_proxy_supplier=self.auth_proxy_supplier)
+        self.auth_provider._access_token = auth_token
+        self.auth_provider._access_token_expiry = expiry
+        if self.auth_provider.check_access_token():
+            self.auth_provider.authenticated = True
 
     def set_position(self, lat, lon, alt=None):
         self.log.debug('Set Position - Lat: %s Lon: %s Alt: %s', lat, lon, alt)
@@ -98,18 +109,8 @@ class PGoApi:
         else:
             self._proxy = URL(proxy)
             if self._proxy.user:
-                scheme = self._proxy.scheme
-                if scheme == 'http':
-                    self.proxy_auth = BasicAuth(
-                        self._proxy.user, self._proxy.password)
-                elif scheme == 'socks5':
-                    self.proxy_auth = Socks5Auth(
-                        self._proxy.user, self._proxy.password)
-                elif scheme == 'socks4':
-                    self.proxy_auth = Socks4Auth(self._proxy.user)
-                else:
-                    raise ValueError(
-                        'Proxy protocol must be http, socks5, or socks4.')
+                self.proxy_auth = get_proxy_auth( self._proxy)
+
 
     @property
     def start_time(self):

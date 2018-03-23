@@ -2,6 +2,17 @@ from time import time
 from json import JSONEncoder
 from struct import pack, unpack
 
+from aiohttp import BasicAuth
+try:
+    from aiosocks import Socks4Auth, Socks5Auth
+except ImportError as e:
+    class Socks4Auth(Exception):
+        def __init__(*args, **kwargs):
+            raise ImportError(
+                'You must install aiosocks to use a SOCKS proxy.')
+    Socks5Auth = Socks4Auth
+
+
 def f2i(float_val):
     return unpack('<q', pack('<d', float_val))[0]
 
@@ -35,3 +46,17 @@ class IdGenerator:
     def request_id(self):
         self.request += 1
         return (self.next() << 32) | self.request
+
+
+def get_proxy_auth(proxy):
+    if proxy.user:
+        scheme = proxy.scheme
+        if scheme == 'http':
+            return BasicAuth(proxy.user, proxy.password)
+        elif scheme == 'socks5':
+            return Socks5Auth(proxy.user, proxy.password)
+        elif scheme == 'socks4':
+            return Socks4Auth(proxy.user)
+        else:
+            raise ValueError(
+                'Proxy protocol must be http, socks5, or socks4.')

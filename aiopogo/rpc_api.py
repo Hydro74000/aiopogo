@@ -1,10 +1,11 @@
 from array import array
-from asyncio import TimeoutError
+from asyncio import TimeoutError, sleep
 from enum import Enum
 from importlib import import_module
 from logging import getLogger
 from os import urandom
 from os.path import join
+from time import time
 from datetime import datetime
 import json
 import base64
@@ -92,7 +93,13 @@ class RpcApi:
     async def request(self, endpoint, subrequests, subplatforms, player_position, device_info=None, proxy=None, proxy_auth=None):
         request_proto = await self._build_main_request(subrequests, subplatforms, player_position, device_info)
 
+        if self.state.delay_handler:
+            await self.state.delay_handler(self.state.most_recent_rpc_start, self.state.most_recent_rpc_end)
+
+        self.state.most_recent_rpc_start = time()
         response = await self._make_rpc(endpoint, request_proto, proxy, proxy_auth)
+        self.state.most_recent_rpc_end = time()
+
         return self._parse_response(response, subrequests, subplatforms)
 
     async def _build_main_request(self, subrequests, subplatforms, player_position, device_info=None):
@@ -453,6 +460,10 @@ class RpcState:
         self.mag_z_max = self.mag_y_min + 15
         self._course = uniform(0, 359.99)
         self.message8 = None
+        self.most_recent_rpc_start = time()
+        self.most_recent_rpc_end = time()
+        self.delay_handler = None
+
 
     @property
     def request_id(self):
